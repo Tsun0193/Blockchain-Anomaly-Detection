@@ -14,8 +14,8 @@ from yaml import safe_load
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from data.dataset import BCDataset
+from model import GAT, GCN, SAGE
 from utils.objectives import objective_gnn
-from model import GCN, GAT, SAGE
 
 warnings.filterwarnings("ignore")
 
@@ -119,13 +119,19 @@ if __name__ == "__main__":
 
     best_path = study.best_trial.user_attrs["model_state_path"]
     logging.info("Best-trial weights are here: %s", best_path)
+    
+    checkpoint_dir = os.path.join("checkpoints", task)
 
-    checkpoint_dir = f"checkpoints/{task}"
-    for f in glob.glob(f"{checkpoint_dir}/{task.lower()}_trial_*.pt"):
-        if f.replace('\\', '/') != best_path and f.endswith(".pt"):
+    # Normalize best_path once
+    best_path = os.path.normpath(best_path)
+
+    for f in glob.glob(os.path.join(checkpoint_dir, f"{task.lower()}_trial_*.pt")):
+        f = os.path.normpath(f)
+        if f != best_path and f.endswith(".pt"):
             os.remove(f)
 
-    os.rename(best_path, f"{checkpoint_dir}/{task.lower()}_best.pt")
+    os.rename(best_path, os.path.join(checkpoint_dir, f"{task.lower()}_best.pt"))
+    
     logging.info(f"✅ Kept only best checkpoint {best_path}")
     logging.info("✅ Results saved successfully.")
     logging.info("✅ Training phase completed successfully.")

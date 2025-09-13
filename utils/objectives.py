@@ -101,41 +101,38 @@ def GNN_features(
 
     ap_test = evaluate(test_loader, test_mask)
     
+    # Optional inline plotting
     plot_path = kwargs.get('plot_path', None)
     if plot_path is not None:
         os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-
-        # Plot train loss and validation AP on two subplots
         epochs = list(range(1, n_epochs + 1))
 
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 8), tight_layout=True)
-
-        ax1.plot(epochs, train_losses)
+        ax1.plot(epochs, train_losses, label="Train Loss")
         ax1.set_xlabel("Epoch")
         ax1.set_ylabel("Train Loss")
         ax1.set_title("Training Loss vs. Epoch")
 
-        ax2.plot(epochs, val_scores)
+        ax2.plot(epochs, val_scores, label="Validation Score")
         ax2.set_xlabel("Epoch")
         ax2.set_ylabel("Validation AP/Acc")
         ax2.set_title("Validation Score vs. Epoch")
 
         fig.savefig(plot_path)
         plt.close(fig)
-        
-    return ap_test
+
+    history = {
+        "train_loss": train_losses,
+        "val_score": val_scores,
+    }
+
+    return {"score": ap_test, "history": history}
+
 
 def objective_gnn(trial, model_cls, model_kwargs=None, **kwargs):
     """
     Universal Optuna objective for GNN models (GCN, GAT, etc.)
-
-    Args:
-        trial: Optuna trial
-        model_cls: class of the model (e.g., GCN, GAT)
-        model_kwargs: static kwargs passed to model_cls
-        kwargs: contains graph, masks, and training settings
-    Returns:
-        AUPRC or Accuracy on the test set
+    Returns test score, and logs history into trial.user_attrs.
     """
     def _get(name, suggest_fn):
         return kwargs[name] if name in kwargs else suggest_fn()
@@ -152,7 +149,7 @@ def objective_gnn(trial, model_cls, model_kwargs=None, **kwargs):
     n_epochs       = _get('n_epochs',       lambda: trial.suggest_int('n_epochs', 128, 512))
     dropout        = _get('dropout',        lambda: trial.suggest_float('dropout', 0.08, 0.64, log=True))
     weight_decay   = _get('weight_decay',   lambda: trial.suggest_float('weight_decay', 1e-5, 1e-2, log=True))
-    aggregator     = _get('aggregator',     lambda: trial.suggest_categorical('aggregator', ['mean', 'max'])) # Only for SAGE
+    aggregator     = _get('aggregator',     lambda: trial.suggest_categorical('aggregator', ['mean', 'max']))
     graphnorm      = False
 
     # Static model config
@@ -170,7 +167,7 @@ def objective_gnn(trial, model_cls, model_kwargs=None, **kwargs):
         **model_kwargs
     )
 
-    ap_score = GNN_features(
+    result = GNN_features(
         graph=graph,
         model=model,
         lr=lr,
@@ -184,6 +181,8 @@ def objective_gnn(trial, model_cls, model_kwargs=None, **kwargs):
 
     model_path = os.path.join(result_path, f"{model_cls.__name__.lower()}_trial_{trial.number}.pt")
     torch.save(model.state_dict(), model_path)
-    trial.set_user_attr("model_state_path", model_path)
 
-    return ap_score
+    trial.set_user_attr("model_state_path", model_path)
+    trial.set_user_attr("history", result["history"])
+
+    return result["score"]
