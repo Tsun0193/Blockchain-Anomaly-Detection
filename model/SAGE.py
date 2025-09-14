@@ -2,8 +2,8 @@ from typing import Tuple
 
 import torch
 import torch.nn.functional as F
-from torch import nn, Tensor
-from torch_geometric.nn import SAGEConv, GraphNorm
+from torch import Tensor, nn
+from torch_geometric.nn import GraphNorm, SAGEConv
 
 
 class SAGE(nn.Module):

@@ -2,7 +2,7 @@ from typing import Tuple
 
 import torch
 import torch.nn.functional as F
-from torch import nn, Tensor
+from torch import Tensor, nn
 from torch_geometric.nn import GATConv, GraphNorm
 
 
