@@ -79,6 +79,7 @@ class BCDataset:
         self.edge_index = edge_index
         
         time_step = torch.tensor(feat_df['time_step'].values, dtype=torch.long)
+        self._time_step = time_step
         assert len(time_splits) == 2, "time_splits must have exactly two values"
         t0, t1 = time_splits
         
@@ -166,16 +167,67 @@ class BCDataset:
         self.test_mask = mask.clone()
         self.test_mask[val_end:] = True
     
-    def get_masks(self):
+    def _build_val_from_train(
+        self,
+        seed: int = 42,
+        val_ratio: float = 0.2,
+        temporal_split: bool = True
+    ) -> None:
+        """
+        Build validation mask from the training mask only (never from test).
+        This is used as a safe fallback when no validation mask is provided.
+        """
+        train_mask = self.train_mask.clone().to(torch.bool)
+        train_indices = torch.nonzero(train_mask, as_tuple=False).view(-1)
+        if train_indices.numel() < 2:
+            raise ValueError("Need at least 2 training samples to derive a validation split.")
+
+        val_count = max(1, int(round(train_indices.numel() * float(val_ratio))))
+        val_count = min(val_count, train_indices.numel() - 1)
+
+        if temporal_split:
+            if hasattr(self, "_time_step"):
+                ordered = train_indices[torch.argsort(self._time_step[train_indices])]
+            else:
+                ordered = train_indices
+            val_indices = ordered[-val_count:]
+        else:
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(int(seed))
+            perm = torch.randperm(train_indices.numel(), generator=generator)
+            val_indices = train_indices[perm[:val_count]]
+
+        val_mask = torch.zeros_like(train_mask, dtype=torch.bool)
+        val_mask[val_indices] = True
+        train_mask[val_indices] = False
+
+        self.train_mask = train_mask
+        self.val_mask = val_mask
+
+    def get_masks(self, seed: int = 42, val_ratio: float = 0.2, temporal_split: bool = True):
         """
         Returns the train, validation, and test masks.
         """
-        if not hasattr(self, 'train_mask') or not hasattr(self, 'val_mask') or not hasattr(self, 'test_mask'):
-            raise AttributeError("Masks are not defined. Initialize the dataset first.")
+        if not hasattr(self, 'train_mask') or not hasattr(self, 'test_mask'):
+            raise AttributeError("Train/test masks are not defined. Initialize the dataset first.")
+        if (not hasattr(self, 'val_mask')) or (self.val_mask is None) or (self.val_mask.sum().item() == 0):
+            self._build_val_from_train(seed=seed, val_ratio=val_ratio, temporal_split=temporal_split)
+
+        train_mask = self.train_mask.clone().to(torch.bool)
+        val_mask = self.val_mask.clone().to(torch.bool)
+        test_mask = self.test_mask.clone().to(torch.bool)
+
+        if torch.logical_and(train_mask, val_mask).any().item():
+            raise AssertionError("train_mask and val_mask must be disjoint.")
+        if torch.logical_and(train_mask, test_mask).any().item():
+            raise AssertionError("train_mask and test_mask must be disjoint.")
+        if torch.logical_and(val_mask, test_mask).any().item():
+            raise AssertionError("val_mask and test_mask must be disjoint.")
+
         return (
-            self.train_mask,
-            self.val_mask,
-            self.test_mask
+            train_mask,
+            val_mask,
+            test_mask
         )
         
     def to_torch_data(self) -> Data:

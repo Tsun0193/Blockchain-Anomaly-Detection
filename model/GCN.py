@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Literal, Tuple
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,6 +17,7 @@ class GCN(nn.Module):
       num_layers (int): Total number of GCNConv layers (>=1).
       dropout (float): Dropout probability.
       graphnorm (bool): Whether to apply GraphNorm after each hidden conv. Default: True.
+      init_mode (str): Output-layer init mode. One of {"default", "xavier"}.
     """
     def __init__(
         self,
@@ -27,7 +28,8 @@ class GCN(nn.Module):
         output_dim: int,
         num_layers: int,
         dropout: float,
-        graphnorm: bool = False
+        graphnorm: bool = False,
+        init_mode: Literal["default", "xavier"] = "xavier",
     ) -> None:
         """
         Initialize the GCN model.
@@ -40,6 +42,7 @@ class GCN(nn.Module):
             num_layers (int): Total number of GCNConv layers (>=1).
             dropout (float): Dropout probability.
             graphnorm (bool): Whether to apply GraphNorm after each hidden conv. Default: True.
+            init_mode (str): Output-layer init mode. One of {"default", "xavier"}.
         """
         super(GCN, self).__init__()
         assert num_layers >= 1, "num_layers must be >= 1"
@@ -73,6 +76,7 @@ class GCN(nn.Module):
         self.dropout = dropout
         self.out = nn.Linear(embedding_dim, output_dim) if output_dim > 0 else None
         self.graphnorm = graphnorm
+        self.init_mode = init_mode
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -83,10 +87,15 @@ class GCN(nn.Module):
             for gn in self.gns:
                 gn.reset_parameters()
 
-        # Xavier initialization
-        nn.init.xavier_uniform_(self.out.weight) if self.out else None
-        if self.out and self.out.bias is not None:
-            nn.init.zeros_(self.out.bias)
+        if self.out:
+            if self.init_mode == "xavier":
+                nn.init.xavier_uniform_(self.out.weight)
+                if self.out.bias is not None:
+                    nn.init.zeros_(self.out.bias)
+            elif self.init_mode == "default":
+                self.out.reset_parameters()
+            else:
+                raise ValueError(f"Unsupported init_mode: {self.init_mode}")
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tuple[Tensor, Tensor]:
         for i, conv in enumerate(self.convs):

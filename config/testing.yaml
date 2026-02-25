@@ -2,9 +2,37 @@ data:
   data_path: "datasets/elliptic/elliptic_data.pt"
   weights_only: false
 
+runtime:
+  # Option 1 (recommended): set gpu_id in [0,1,2,3] -> device becomes cuda:{gpu_id}
+  gpu_id: 0
+  available_cuda_ids: [0, 1, 2, 3]
+  # Option 2: set explicit device string (used when gpu_id is null)
+  device: "cuda:0"
+
+experiment:
+  # baseline | xavier_only | graphnorm_xavier
+  setting: "baseline"
+  presets:
+    baseline:
+      graphnorm: false
+      init_mode: "default"
+      results_root: "results"
+      checkpoint_root: "checkpoints"
+    xavier_only:
+      graphnorm: false
+      init_mode: "xavier"
+      results_root: "results_no_graphnorm"
+      checkpoint_root: "checkpoints_no_graphnorm"
+    graphnorm_xavier:
+      graphnorm: true
+      init_mode: "xavier"
+      results_root: "results_with_graphnorm"
+      checkpoint_root: "checkpoints_with_graphnorm"
+
 evaluation:
   percentiles: [90, 99, 99.9]
 
+# Backward compatibility (runtime.device is preferred)
 device: "cuda:0"
 
 pretrained:

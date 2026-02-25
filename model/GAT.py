@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Literal, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -21,6 +21,7 @@ class GAT(nn.Module):
       graphnorm (bool): Whether to apply GraphNorm after each hidden conv. Default: True.
       n_heads (int): Number of attention heads. Default: 8.
       negative_slope (float): LeakyReLU negative slope. Default: 0.2.
+      init_mode (str): Output-layer init mode. One of {"default", "xavier"}.
     """
     def __init__(
         self,
@@ -32,6 +33,7 @@ class GAT(nn.Module):
         num_layers: int,
         dropout: float,
         graphnorm: bool = False,
+        init_mode: Literal["default", "xavier"] = "xavier",
         n_heads: int = 4,
         negative_slope: float = 0.2
     ) -> None:
@@ -44,6 +46,7 @@ class GAT(nn.Module):
         self.dropout = dropout
         self.graphnorm = graphnorm
         self.n_heads = n_heads
+        self.init_mode = init_mode
 
         if num_layers == 1:
             self.convs.append(
@@ -78,9 +81,14 @@ class GAT(nn.Module):
             for gn in self.gns:
                 gn.reset_parameters()
         if self.out:
-            nn.init.xavier_uniform_(self.out.weight)
-            if self.out.bias is not None:
-                nn.init.zeros_(self.out.bias)
+            if self.init_mode == "xavier":
+                nn.init.xavier_uniform_(self.out.weight)
+                if self.out.bias is not None:
+                    nn.init.zeros_(self.out.bias)
+            elif self.init_mode == "default":
+                self.out.reset_parameters()
+            else:
+                raise ValueError(f"Unsupported init_mode: {self.init_mode}")
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
         for i, conv in enumerate(self.convs):

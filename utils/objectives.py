@@ -1,4 +1,5 @@
 import os
+import inspect
 
 import matplotlib.pyplot as plt
 import torch
@@ -19,6 +20,8 @@ def GNN_features(
     train_mask: torch.Tensor = None,
     val_mask: torch.Tensor = None,
     test_mask: torch.Tensor = None,
+    selection_split: str = "val",
+    evaluate_test: bool = True,
     **kwargs
 ):
     device = kwargs.get('device', 'cpu')
@@ -32,12 +35,11 @@ def GNN_features(
     
     train_losses = []
     val_scores = []
-    
-    train_mask = torch.logical_or(train_mask, val_mask).detach()
-    
-    # for experiment purposes, we can use the test mask as validation mask
-    val_mask = test_mask
-    val_loader = test_loader
+    val_losses = []
+
+    if val_mask is not None and test_mask is not None:
+        has_overlap = torch.logical_and(val_mask.bool(), test_mask.bool()).any().item()
+        assert not has_overlap, "Sanity check failed: val_mask and test_mask must be disjoint."
     
     def train_epoch():
         model.train()
@@ -65,41 +67,78 @@ def GNN_features(
     def evaluate(loader, mask):
         model.eval()
         if loader is None:
+            if mask is None or mask.sum().item() == 0:
+                return None, None
             with torch.no_grad():
                 y_hat = model(graph.x, graph.edge_index.to(device))
                 logits = y_hat[mask]
                 labels = graph.y[mask]
                 probs = logits.softmax(dim=1)
+                loss_val = criterion(logits, labels).item()
         else:
             all_probs = []
             all_labels = []
+            total_loss = 0.0
+            total_count = 0
             with torch.no_grad():
                 for batch in loader:
                     batch = batch.to(device)
                     y_hat = model(batch.x, batch.edge_index)[: batch.batch_size]
-                    all_probs.append(y_hat.softmax(dim=1).cpu())
-                    all_labels.append(batch.y[: batch.batch_size].cpu())
+                    labels = batch.y[: batch.batch_size]
+                    total_loss += criterion(y_hat, labels).item() * labels.size(0)
+                    total_count += labels.size(0)
+                    all_probs.append(y_hat.softmax(dim=1).detach().cpu())
+                    all_labels.append(labels.detach().cpu())
+            if total_count == 0:
+                return None, None
+            loss_val = total_loss / total_count
             probs = torch.cat(all_probs, dim=0)
             labels = torch.cat(all_labels, dim=0)
+
+        if labels.numel() == 0:
+            return None, None
 
         try:
             ap = average_precision_score(labels.numpy(), probs.numpy()[:, 1])
         except Exception:
             preds = probs.argmax(dim=1)
             ap = (preds == labels).sum().item() / labels.size(0)
-        return ap
+        return ap, loss_val
 
     for _ in range(n_epochs):
         loss_train = train_epoch()
         train_losses.append(loss_train)
 
         if (val_mask is not None) or (val_loader is not None):
-            ap_val = evaluate(val_loader, val_mask)
+            ap_val, loss_val = evaluate(val_loader, val_mask)
         else:
             ap_val = None
+            loss_val = None
         val_scores.append(ap_val)
+        val_losses.append(loss_val)
 
-    ap_test = evaluate(test_loader, test_mask)
+    ap_test = None
+    if evaluate_test and ((test_mask is not None and test_mask.sum().item() > 0) or (test_loader is not None)):
+        ap_test, _ = evaluate(test_loader, test_mask)
+
+    valid_val_scores = [score for score in val_scores if score is not None]
+    best_val_score = max(valid_val_scores) if len(valid_val_scores) > 0 else None
+
+    if selection_split == "val":
+        if best_val_score is None:
+            raise ValueError("Validation metric is required for Optuna objective, but no val split is available.")
+        score = best_val_score
+        objective_source = "val"
+    elif selection_split == "test":
+        if ap_test is None:
+            raise ValueError("selection_split='test' requires available test metrics.")
+        score = ap_test
+        objective_source = "test"
+    elif selection_split in (None, "none"):
+        score = None
+        objective_source = "none"
+    else:
+        raise ValueError(f"Unsupported selection_split: {selection_split}")
     
     # Optional inline plotting
     plot_path = kwargs.get('plot_path', None)
@@ -124,15 +163,23 @@ def GNN_features(
     history = {
         "train_loss": train_losses,
         "val_score": val_scores,
+        "val_loss": val_losses,
+        "best_val_score": best_val_score,
     }
 
-    return {"score": ap_test, "history": history}
+    return {
+        "score": score,
+        "objective_source": objective_source,
+        "val_score": best_val_score,
+        "test_score": ap_test,
+        "history": history
+    }
 
 
 def objective_gnn(trial, model_cls, model_kwargs=None, **kwargs):
     """
     Universal Optuna objective for GNN models (GCN, GAT, etc.)
-    Returns test score, and logs history into trial.user_attrs.
+    Returns validation score, and logs history into trial.user_attrs.
     """
     def _get(name, suggest_fn):
         return kwargs[name] if name in kwargs else suggest_fn()
@@ -150,22 +197,27 @@ def objective_gnn(trial, model_cls, model_kwargs=None, **kwargs):
     dropout        = _get('dropout',        lambda: trial.suggest_float('dropout', 0.08, 0.64, log=True))
     weight_decay   = _get('weight_decay',   lambda: trial.suggest_float('weight_decay', 1e-5, 1e-2, log=True))
     aggregator     = _get('aggregator',     lambda: trial.suggest_categorical('aggregator', ['mean', 'max']))
-    graphnorm      = False
+    graphnorm      = bool(kwargs.get('graphnorm', False))
+    init_mode      = kwargs.get('init_mode', 'xavier')
 
     # Static model config
     model_kwargs = model_kwargs or {}
-    model = model_cls(
-        edge_index=graph.edge_index,
-        in_channels=graph.num_features,
-        hidden_dim=hidden_dim,
-        embedding_dim=embedding_dim,
-        output_dim=2,
-        num_layers=num_layers,
-        dropout=dropout,
-        graphnorm=graphnorm,
-        aggregator=aggregator,
-        **model_kwargs
-    )
+    base_kwargs = {
+        "edge_index": graph.edge_index,
+        "in_channels": graph.num_features,
+        "hidden_dim": hidden_dim,
+        "embedding_dim": embedding_dim,
+        "output_dim": 2,
+        "num_layers": num_layers,
+        "dropout": dropout,
+        "graphnorm": graphnorm,
+        "init_mode": init_mode,
+        "aggregator": aggregator,
+        **model_kwargs,
+    }
+    signature = inspect.signature(model_cls.__init__)
+    filtered_kwargs = {k: v for k, v in base_kwargs.items() if k in signature.parameters}
+    model = model_cls(**filtered_kwargs)
 
     result = GNN_features(
         graph=graph,
@@ -176,7 +228,9 @@ def objective_gnn(trial, model_cls, model_kwargs=None, **kwargs):
         val_mask=kwargs['masks'][1],
         test_mask=kwargs['masks'][2],
         device=kwargs.get('device', 'cpu'),
-        weight_decay=weight_decay
+        weight_decay=weight_decay,
+        selection_split="val",
+        evaluate_test=kwargs.get("log_test_metric", True)
     )
 
     model_path = os.path.join(result_path, f"{model_cls.__name__.lower()}_trial_{trial.number}.pt")
@@ -184,5 +238,11 @@ def objective_gnn(trial, model_cls, model_kwargs=None, **kwargs):
 
     trial.set_user_attr("model_state_path", model_path)
     trial.set_user_attr("history", result["history"])
+    trial.set_user_attr("val_score", result["val_score"])
+    trial.set_user_attr("test_score", result["test_score"])
+    trial.set_user_attr("objective_source", result["objective_source"])
+
+    assert result["objective_source"] == "val", "Optuna objective must be based on validation metric."
+    assert result["score"] == result["val_score"], "Objective return must match validation score."
 
     return result["score"]

@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Literal, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -20,6 +20,7 @@ class SAGE(nn.Module):
       dropout (float): Dropout probability.
       graphnorm (bool): Whether to apply GraphNorm after each hidden conv. Default: True.
       aggregator (str): Aggregation function ('mean', 'max', 'pool', 'lstm'). Default: 'mean'.
+      init_mode (str): Output-layer init mode. One of {"default", "xavier"}.
     """
     def __init__(
         self,
@@ -31,7 +32,8 @@ class SAGE(nn.Module):
         num_layers: int,
         dropout: float,
         graphnorm: bool = True,
-        aggregator: str = "mean"
+        aggregator: str = "mean",
+        init_mode: Literal["default", "xavier"] = "xavier",
     ) -> None:
         super(SAGE, self).__init__()
         assert num_layers >= 1, "num_layers must be >= 1"
@@ -41,6 +43,7 @@ class SAGE(nn.Module):
         self.edge_index = edge_index
         self.dropout = dropout
         self.graphnorm = graphnorm
+        self.init_mode = init_mode
 
         if num_layers == 1:
             self.convs.append(SAGEConv(in_channels, embedding_dim, aggr=aggregator))
@@ -60,7 +63,7 @@ class SAGE(nn.Module):
             self.convs.append(SAGEConv(hidden_dim, embedding_dim, aggr=aggregator))
 
         self.out = nn.Linear(embedding_dim, output_dim) if output_dim > 0 else None
-        # self.reset_parameters()
+        self.reset_parameters()
 
     def reset_parameters(self):
         for conv in self.convs:
@@ -69,9 +72,14 @@ class SAGE(nn.Module):
             for gn in self.gns:
                 gn.reset_parameters()
         if self.out:
-            nn.init.xavier_uniform_(self.out.weight)
-            if self.out.bias is not None:
-                nn.init.zeros_(self.out.bias)
+            if self.init_mode == "xavier":
+                nn.init.xavier_uniform_(self.out.weight)
+                if self.out.bias is not None:
+                    nn.init.zeros_(self.out.bias)
+            elif self.init_mode == "default":
+                self.out.reset_parameters()
+            else:
+                raise ValueError(f"Unsupported init_mode: {self.init_mode}")
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tensor:
         for i, conv in enumerate(self.convs):
