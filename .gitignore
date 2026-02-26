@@ -173,10 +173,12 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 *.zip
-*.csv
 *.pt
 *.npz
 
 checkpoints/
 *.png
 datasets/
+*.txt
+*.pth
+legacy/

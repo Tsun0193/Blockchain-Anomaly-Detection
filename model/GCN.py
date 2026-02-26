@@ -1,10 +1,10 @@
-from typing import Tuple
+from typing import Literal, Tuple
 
-from torch import Tensor
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv
+from torch import Tensor
+from torch_geometric.nn import GCNConv, GraphNorm
+
 
 class GCN(nn.Module):
     """
@@ -16,7 +16,8 @@ class GCN(nn.Module):
       out_channels (int): Number of output classes.
       num_layers (int): Total number of GCNConv layers (>=1).
       dropout (float): Dropout probability.
-      batchnorm (bool): Whether to apply BatchNorm1d after each hidden conv. Default: True.
+      graphnorm (bool): Whether to apply GraphNorm after each hidden conv. Default: True.
+      init_mode (str): Output-layer init mode. One of {"default", "xavier"}.
     """
     def __init__(
         self,
@@ -27,7 +28,8 @@ class GCN(nn.Module):
         output_dim: int,
         num_layers: int,
         dropout: float,
-        batchnorm: bool = True
+        graphnorm: bool = False,
+        init_mode: Literal["default", "xavier"] = "xavier",
     ) -> None:
         """
         Initialize the GCN model.
@@ -39,13 +41,14 @@ class GCN(nn.Module):
             output_dim (int): Number of output classes (0 for no output layer).
             num_layers (int): Total number of GCNConv layers (>=1).
             dropout (float): Dropout probability.
-            batchnorm (bool): Whether to apply BatchNorm1d after each hidden conv. Default: True.
+            graphnorm (bool): Whether to apply GraphNorm after each hidden conv. Default: True.
+            init_mode (str): Output-layer init mode. One of {"default", "xavier"}.
         """
         super(GCN, self).__init__()
         assert num_layers >= 1, "num_layers must be >= 1"
 
         self.convs = nn.ModuleList()
-        self.bns = nn.ModuleList() if batchnorm else None
+        self.gns = nn.ModuleList() if graphnorm else None
         self.edge_index = edge_index
 
         if num_layers == 1:
@@ -56,15 +59,15 @@ class GCN(nn.Module):
             self.convs.append(
                 GCNConv(in_channels, hidden_dim, cached=True)
             )
-            if batchnorm:
-                self.bns.append(nn.BatchNorm1d(hidden_dim))
+            if graphnorm:
+                self.gns.append(GraphNorm(hidden_dim))
 
             for _ in range(num_layers - 2):
                 self.convs.append(
                     GCNConv(hidden_dim, hidden_dim, cached=True)
                 )
-                if batchnorm:
-                    self.bns.append(nn.BatchNorm1d(hidden_dim))
+                if graphnorm:
+                    self.gns.append(GraphNorm(hidden_dim))
 
             self.convs.append(
                 GCNConv(hidden_dim, embedding_dim, cached=True)
@@ -72,34 +75,39 @@ class GCN(nn.Module):
 
         self.dropout = dropout
         self.out = nn.Linear(embedding_dim, output_dim) if output_dim > 0 else None
-        self.batchnorm = batchnorm
+        self.graphnorm = graphnorm
+        self.init_mode = init_mode
         self.reset_parameters()
 
     def reset_parameters(self):
-        # Reset GCNConv layers
         for conv in self.convs:
             conv.reset_parameters()
-        # Reset BatchNorm layers
-        if self.batchnorm:
-            for bn in self.bns:
-                bn.reset_parameters()
-        # Xavier initialization
-        nn.init.xavier_uniform_(self.out.weight) if self.out else None
-        if self.out and self.out.bias is not None:
-            nn.init.zeros_(self.out.bias)
+
+        if self.graphnorm:
+            for gn in self.gns:
+                gn.reset_parameters()
+
+        if self.out:
+            if self.init_mode == "xavier":
+                nn.init.xavier_uniform_(self.out.weight)
+                if self.out.bias is not None:
+                    nn.init.zeros_(self.out.bias)
+            elif self.init_mode == "default":
+                self.out.reset_parameters()
+            else:
+                raise ValueError(f"Unsupported init_mode: {self.init_mode}")
 
     def forward(self, x: Tensor, edge_index: Tensor) -> Tuple[Tensor, Tensor]:
         for i, conv in enumerate(self.convs):
             x = conv(x, edge_index)
 
             if i < len(self.convs) - 1:
-                if self.batchnorm:
-                    x = self.bns[i](x)
+                if self.graphnorm:
+                    x = self.gns[i](x)
                 x = F.relu(x)
                 x = F.dropout(x, p=self.dropout, training=self.training)
 
-        h = x
-        out = self.out(h)
+        out = self.out(x) if self.out else x
         # out = F.log_softmax(out, dim=1) doing cross entropy loss outside
 
-        return out, h
+        return out

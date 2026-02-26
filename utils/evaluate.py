@@ -1,10 +1,13 @@
-import torch
 import random
-import numpy as np
-
-from sklearn.metrics import roc_auc_score, average_precision_score, precision_score, recall_score, f1_score
-from tqdm.auto import tqdm
 from typing import Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+from sklearn.metrics import (average_precision_score, f1_score,
+                             precision_score, recall_score, roc_auc_score)
+from tqdm.auto import tqdm
+
 
 def resample_testmask(test_mask, 
                       p=0.5):
@@ -42,15 +45,14 @@ def evaluate(data,
         test_mask_new = resample_testmask(test_mask)
         if loader is None:
             model.eval()
-            out, h = model(data.x, data.edge_index.to(device))
-            y_hat = out[test_mask_new].to(device)
+            y_hat = model(data.x, data.edge_index.to(device))
+            y_hat = y_hat[test_mask_new].to(device)
             y = data.y[test_mask_new].to(device)
             
         else:
             batch = next(iter(loader))
             batch = batch.to(device, 'edge_index')
-            out, h = model(batch.x, batch.edge_index)
-            y_hat = out[:batch.batch_size]
+            y_hat = model(batch.x, batch.edge_index)[:batch.batch_size]
             y = batch.y[:batch.batch_size]
 
         y_hat  = y_hat.softmax(dim=1) # Get probability of fraud
@@ -73,3 +75,26 @@ def evaluate(data,
             F1_dict[percentile_q].append(F1)
 
     return (AUC_list, AP_list, precision_dict, recall_dict, F1_dict)
+
+# for experiment purposes
+def deep_train(data, model, train_mask, n_epochs, lr, batch_size, loader = None):
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=5e-4)  # Define optimizer.
+    criterion = nn.CrossEntropyLoss()  # Define loss function.
+
+    def train_GNN():
+        model.train()
+        optimizer.zero_grad()
+        y_hat = model(data.x, data.edge_index.to(device))
+        y = data.y
+        loss = criterion(y_hat[train_mask], y[train_mask])
+        loss.backward()
+        optimizer.step()
+
+        return(loss)
+
+    for _ in range(n_epochs):
+        loss_train = train_GNN()
+        print('Epoch: {:03d}, Loss: {:.4f}'.format(_, loss_train))
